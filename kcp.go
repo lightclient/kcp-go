@@ -100,12 +100,19 @@ func _itimediff(later, earlier uint32) int32 {
 
 // segment defines a KCP segment
 type segment struct {
-	conv     uint32
-	cmd      uint8
-	frg      uint8
-	wnd      uint16
-	ts       uint32
-	sn       uint32
+	// conversation id
+	conv uint32
+	// command?
+	cmd uint8
+	// fragment
+	frg uint8
+	// remote window size
+	wnd uint16
+	// time stamp
+	ts uint32
+	// serial number
+	sn uint32
+	// ??
 	una      uint32
 	rto      uint32
 	xmit     uint32
@@ -131,19 +138,46 @@ func (seg *segment) encode(ptr []byte) []byte {
 
 // KCP defines a single KCP connection
 type KCP struct {
-	conv, mtu, mss, state                  uint32
-	snd_una, snd_nxt, rcv_nxt              uint32
-	ssthresh                               uint32
-	rx_rttvar, rx_srtt                     int32
-	rx_rto, rx_minrto                      uint32
-	snd_wnd, rcv_wnd, rmt_wnd, cwnd, probe uint32
-	interval, ts_flush                     uint32
-	nodelay, updated                       uint32
-	ts_probe, probe_wait                   uint32
-	dead_link, incr                        uint32
+	conv,
+	mtu,
+	// msg size?
+	mss,
+	state,
+	// un-acknowledged serial number
+	snd_una,
+	snd_nxt,
+	// next serial / sequence number needed to receive
+	rcv_nxt,
+	ssthresh uint32
 
-	fastresend     int32
-	nocwnd, stream int32
+	rx_rttvar,
+	rx_srtt int32
+
+	// current retransmission timeout
+	rx_rto,
+
+	// min retransmission timeout
+	rx_minrto,
+	snd_wnd,
+	rcv_wnd,
+
+	// latest window size update from remote
+	rmt_wnd,
+	cwnd,
+	probe,
+	interval,
+	ts_flush,
+	nodelay,
+	updated,
+	ts_probe,
+	probe_wait,
+	dead_link,
+	incr uint32
+
+	fastresend int32
+
+	nocwnd,
+	stream int32
 
 	snd_queue []segment
 	rcv_queue []segment
@@ -215,19 +249,24 @@ func (kcp *KCP) ReserveBytes(n int) bool {
 
 // PeekSize checks the size of next message in the recv queue
 func (kcp *KCP) PeekSize() (length int) {
+	// return -1 if queue is empty.
 	if len(kcp.rcv_queue) == 0 {
 		return -1
 	}
 
 	seg := &kcp.rcv_queue[0]
 	if seg.frg == 0 {
+		// return len of next message
 		return len(seg.data)
 	}
 
+	// if the segment was fragmented, wait until all fragments arrive to
+	// calculate length.
 	if len(kcp.rcv_queue) < int(seg.frg+1) {
 		return -1
 	}
 
+	// sum the size of each fragment.
 	for k := range kcp.rcv_queue {
 		seg := &kcp.rcv_queue[k]
 		length += len(seg.data)
@@ -239,6 +278,9 @@ func (kcp *KCP) PeekSize() (length int) {
 }
 
 // Receive data from kcp state machine
+//
+// This is called to read data bytes that have been processed by KCP, mainly
+// reconstructing segments.
 //
 // Return number of bytes read.
 //
@@ -281,14 +323,18 @@ func (kcp *KCP) Recv(buffer []byte) (n int) {
 	count = 0
 	for k := range kcp.rcv_buf {
 		seg := &kcp.rcv_buf[k]
+		// check if the segment has the next expected sequence number
+		// also ensure queue stays below window
 		if seg.sn == kcp.rcv_nxt && len(kcp.rcv_queue)+count < int(kcp.rcv_wnd) {
 			kcp.rcv_nxt++
 			count++
 		} else {
+			// break if out-of-order packet or window reached
 			break
 		}
 	}
 
+	// move in-order segments from buffer to queue
 	if count > 0 {
 		kcp.rcv_queue = append(kcp.rcv_queue, kcp.rcv_buf[:count]...)
 		kcp.rcv_buf = kcp.remove_front(kcp.rcv_buf, count)
@@ -298,6 +344,8 @@ func (kcp *KCP) Recv(buffer []byte) (n int) {
 	if len(kcp.rcv_queue) < int(kcp.rcv_wnd) && fast_recover {
 		// ready to send back IKCP_CMD_WINS in ikcp_flush
 		// tell remote my window size
+
+		// ???
 		kcp.probe |= IKCP_ASK_TELL
 	}
 	return
@@ -305,7 +353,7 @@ func (kcp *KCP) Recv(buffer []byte) (n int) {
 
 // Send is user/upper level send, returns below zero for error
 func (kcp *KCP) Send(buffer []byte) int {
-	var count int
+
 	if len(buffer) == 0 {
 		return -1
 	}
@@ -316,7 +364,10 @@ func (kcp *KCP) Send(buffer []byte) int {
 		if n > 0 {
 			seg := &kcp.snd_queue[n-1]
 			if len(seg.data) < int(kcp.mss) {
+				// calculate delta between max message size and current segment size
 				capacity := int(kcp.mss) - len(seg.data)
+
+				// determine how much to extend the buffer by
 				extend := capacity
 				if len(buffer) < capacity {
 					extend = len(buffer)
@@ -325,51 +376,72 @@ func (kcp *KCP) Send(buffer []byte) int {
 				// grow slice, the underlying cap is guaranteed to
 				// be larger than kcp.mss
 				oldlen := len(seg.data)
+
+				// why not just use append?
 				seg.data = seg.data[:oldlen+extend]
 				copy(seg.data[oldlen:], buffer)
+
+				// update buffer slice to only be what wasn't streamed into this segment
 				buffer = buffer[extend:]
 			}
 		}
 
+		// if the entire buffer was streamed, break
 		if len(buffer) == 0 {
 			return 0
 		}
 	}
 
+	// Calculate how many messages this buffer requires.
+	var count int
 	if len(buffer) <= int(kcp.mss) {
 		count = 1
 	} else {
 		count = (len(buffer) + int(kcp.mss) - 1) / int(kcp.mss)
 	}
 
+	// can't deal with buffers of size kcp.mss * 256 (presumably because 8 bit somewhere?)
 	if count > 255 {
 		return -2
 	}
 
+	// how is this possible?
 	if count == 0 {
 		count = 1
 	}
 
 	for i := 0; i < count; i++ {
+		// get size of message - seems a bit redundant since each msg except last is full
 		var size int
 		if len(buffer) > int(kcp.mss) {
 			size = int(kcp.mss)
 		} else {
 			size = len(buffer)
 		}
+
+		// get segment buffer from global pool
 		seg := kcp.newSegment(size)
 		copy(seg.data, buffer[:size])
+
+		// this seems like an important distinction -- when stream mode off, if the msg
+		// is too big for one msg, it notes that the message is fragmented
+		// however in stream mode, it doesn't -- i guess this makes a bit of sense because
+		// stream mode could have different msgs concatenated together
+
 		if kcp.stream == 0 { // message mode
 			seg.frg = uint8(count - i - 1)
 		} else { // stream mode
 			seg.frg = 0
 		}
+		// add to send queue
 		kcp.snd_queue = append(kcp.snd_queue, seg)
+		// move buffer forward
 		buffer = buffer[size:]
 	}
 	return 0
 }
 
+// Update retransmission timeout
 func (kcp *KCP) update_ack(rtt int32) {
 	// https://tools.ietf.org/html/rfc6298
 	var rto uint32
@@ -395,6 +467,7 @@ func (kcp *KCP) update_ack(rtt int32) {
 	kcp.rx_rto = _ibound_(kcp.rx_minrto, rto, IKCP_RTO_MAX)
 }
 
+// todo
 func (kcp *KCP) shrink_buf() {
 	if len(kcp.snd_buf) > 0 {
 		seg := &kcp.snd_buf[0]
@@ -404,6 +477,7 @@ func (kcp *KCP) shrink_buf() {
 	}
 }
 
+// finds matching serial number and marks it as "acked" and frees the data
 func (kcp *KCP) parse_ack(sn uint32) {
 	if _itimediff(sn, kcp.snd_una) < 0 || _itimediff(sn, kcp.snd_nxt) >= 0 {
 		return
@@ -426,6 +500,8 @@ func (kcp *KCP) parse_ack(sn uint32) {
 	}
 }
 
+// go through send buffer looking for segments below acked sn and mark them as fast acks if
+// the segment timestamp is before the ts parameter ?
 func (kcp *KCP) parse_fastack(sn, ts uint32) {
 	if _itimediff(sn, kcp.snd_una) < 0 || _itimediff(sn, kcp.snd_nxt) >= 0 {
 		return
@@ -441,11 +517,13 @@ func (kcp *KCP) parse_fastack(sn, ts uint32) {
 	}
 }
 
+// remove segments implicitly acked by the un-acked number
 func (kcp *KCP) parse_una(una uint32) int {
 	count := 0
 	for k := range kcp.snd_buf {
 		seg := &kcp.snd_buf[k]
 		if _itimediff(una, seg.sn) > 0 {
+			// recylce the data buffer
 			kcp.delSegment(seg)
 			count++
 		} else {
@@ -453,6 +531,7 @@ func (kcp *KCP) parse_una(una uint32) int {
 		}
 	}
 	if count > 0 {
+		// delete the segments from buffer
 		kcp.snd_buf = kcp.remove_front(kcp.snd_buf, count)
 	}
 	return count
@@ -528,6 +607,8 @@ func (kcp *KCP) parse_data(newseg segment) bool {
 // 'ackNoDelay' will trigger immediate ACK, but surely it will not be efficient in bandwidth
 func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 	snd_una := kcp.snd_una
+
+	// Packet smaller than KCP header, must be invalid
 	if len(data) < IKCP_OVERHEAD {
 		return -1
 	}
@@ -542,6 +623,7 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 		var wnd uint16
 		var cmd, frg uint8
 
+		// smaller than KCP header, must be invalid
 		if len(data) < int(IKCP_OVERHEAD) {
 			break
 		}
@@ -558,19 +640,24 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 		data = ikcp_decode32u(data, &sn)
 		data = ikcp_decode32u(data, &una)
 		data = ikcp_decode32u(data, &length)
+
+		// size of data decoded does not match packet specified length
 		if len(data) < int(length) {
 			return -2
 		}
 
+		// Unknown KCP command
 		if cmd != IKCP_CMD_PUSH && cmd != IKCP_CMD_ACK &&
 			cmd != IKCP_CMD_WASK && cmd != IKCP_CMD_WINS {
 			return -3
 		}
 
 		// only trust window updates from regular packets. i.e: latest update
+		// why?
 		if regular {
 			kcp.rmt_wnd = uint32(wnd)
 		}
+		// if there acked segments, slide the window ?
 		if kcp.parse_una(una) > 0 {
 			windowSlides = true
 		}
@@ -582,9 +669,11 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 			flag |= 1
 			latest = ts
 		} else if cmd == IKCP_CMD_PUSH {
+			// got pushed data
 			repeat := true
 			if _itimediff(sn, kcp.rcv_nxt+kcp.rcv_wnd) < 0 {
 				kcp.ack_push(sn, ts)
+				// skip serial numbers later than the next expected one ?
 				if _itimediff(sn, kcp.rcv_nxt) >= 0 {
 					var seg segment
 					seg.conv = conv
@@ -595,6 +684,7 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 					seg.sn = sn
 					seg.una = una
 					seg.data = data[:length] // delayed data copying
+					// ?
 					repeat = kcp.parse_data(seg)
 				}
 			}
@@ -606,7 +696,7 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 			// tell remote my window size
 			kcp.probe |= IKCP_ASK_TELL
 		} else if cmd == IKCP_CMD_WINS {
-			// do nothing
+			// do nothing, window size is accounted for above
 		} else {
 			return -3
 		}
