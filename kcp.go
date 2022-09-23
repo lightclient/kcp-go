@@ -112,14 +112,20 @@ type segment struct {
 	ts uint32
 	// serial number
 	sn uint32
-	// ??
-	una      uint32
-	rto      uint32
+	// un-acked number
+	una uint32
+	// packet data
+	data []byte
+
+	// not in segment, used during processing
+	// retransmission timeout
+	rto uint32
+	// ?
 	xmit     uint32
 	resendts uint32
 	fastack  uint32
 	acked    uint32 // mark if the seg has acked
-	data     []byte
+
 }
 
 // encode a segment into buffer
@@ -138,57 +144,87 @@ func (seg *segment) encode(ptr []byte) []byte {
 
 // KCP defines a single KCP connection
 type KCP struct {
+	// conversation id
 	conv,
+	// maximum transmission unit
 	mtu,
-	// msg size?
+	// max segment size
 	mss,
+	// connection state ?
 	state,
-	// un-acknowledged serial number
+	// first un-acknowledged serial number
 	snd_una,
+	// next serial number to use when sending
 	snd_nxt,
-	// next serial / sequence number needed to receive
+	// next serial number needed to receive
 	rcv_nxt,
-	ssthresh uint32
 
+	// congestion window threshold
+	ssthresh uint32
+	// retransmission vars
 	rx_rttvar,
 	rx_srtt int32
-
 	// current retransmission timeout
 	rx_rto,
-
 	// min retransmission timeout
 	rx_minrto,
-	snd_wnd,
-	rcv_wnd,
 
-	// latest window size update from remote
+	// sending window
+	snd_wnd,
+	// receiving window
+	rcv_wnd,
+	// latest receive window size update from remote
 	rmt_wnd,
+
+	// congestion window ??
 	cwnd,
+
+	// should window be checked
 	probe,
+
+	// flush interval
 	interval,
+	// next flush interval ?
 	ts_flush,
+
 	nodelay,
+	// update has been called
 	updated,
+	// next check window time stamp
 	ts_probe,
+	// check windown wait time
 	probe_wait,
+	// maximum resend time
 	dead_link,
+	// maximum payload size
 	incr uint32
 
+	// ack number to trigger fast resend ?
 	fastresend int32
 
+	// disable congestion control
 	nocwnd,
+	// stream mode
 	stream int32
 
+	// segment sits in queue first before getting sent
 	snd_queue []segment
-	rcv_queue []segment
-	snd_buf   []segment
-	rcv_buf   []segment
+	// segment is here after it's sent and waiting to be acked
+	snd_buf []segment
 
+	// segment is first placed here when input into kcp
+	rcv_buf []segment
+	// segment is placed here when it is ready to leave kcp state machine
+	rcv_queue []segment
+
+	// list things to ack
 	acklist []ackItem
 
 	buffer   []byte
 	reserved int
-	output   output_callback
+
+	// callback object for writing
+	output output_callback
 }
 
 type ackItem struct {
